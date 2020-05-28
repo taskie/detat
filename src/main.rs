@@ -19,8 +19,8 @@ use structopt::{clap, StructOpt};
 #[structopt(long_version(option_env!("LONG_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))))]
 #[structopt(setting(clap::AppSettings::ColoredHelp))]
 pub struct Opt {
-    #[structopt(name = "PATH")]
-    path: Option<PathBuf>,
+    #[structopt(name = "PATHS")]
+    paths: Vec<PathBuf>,
 
     #[structopt(short, long, default_value = "0")]
     confidence_min: f32,
@@ -59,6 +59,7 @@ pub struct Metadata {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Output {
+    path: Option<String>,
     metadata: Metadata,
     content: String,
 }
@@ -109,11 +110,17 @@ impl Detat {
         Ok(Metadata { chardet, encoding: encoding.to_string(), fallbacked, read_bytes })
     }
 
-    pub fn copy_as_json<R: Read, W: Write>(&self, r: &mut R, w: &mut W) -> Result<Metadata, io::Error> {
+    pub fn copy_as_json<R: Read, W: Write>(
+        &self,
+        r: &mut R,
+        path: Option<&Path>,
+        w: &mut W,
+    ) -> Result<Metadata, io::Error> {
         let mut content: Vec<u8> = Vec::new();
         let metadata = self.copy(r, &mut content)?;
         let mut json = {
-            let output = Output { metadata: metadata.clone(), content: String::from_utf8(content).unwrap() };
+            let path = path.and_then(|p| p.to_str()).map(|s| s.to_owned());
+            let output = Output { metadata: metadata.clone(), path, content: String::from_utf8(content).unwrap() };
             serde_json::to_vec(&output).unwrap()
         };
         json.push('\n' as u8);
@@ -125,7 +132,7 @@ impl Detat {
         let stdin = io::stdin();
         let mut handle = stdin.lock();
         if self.json {
-            self.copy_as_json(&mut handle, w)
+            self.copy_as_json(&mut handle, None, w)
         } else {
             self.copy(&mut handle, w)
         }
@@ -134,24 +141,21 @@ impl Detat {
     pub fn copy_from_file<W: Write>(&self, path: &Path, w: &mut W) -> Result<Metadata, io::Error> {
         let mut file = File::open(path)?;
         if self.json {
-            self.copy_as_json(&mut file, w)
+            self.copy_as_json(&mut file, Some(path), w)
         } else {
             self.copy(&mut file, w)
         }
     }
 
-    pub fn run(&self, path: Option<PathBuf>) -> Result<Metadata, io::Error> {
+    pub fn run(&self, path: &Path) -> Result<Metadata, io::Error> {
         let stdout = io::stdout();
         let w = stdout.lock();
         let mut bw = BufWriter::new(w);
-        let metadata = if let Some(path) = path {
-            if path.to_str().unwrap() == "-" {
-                self.copy_from_stdin(&mut bw)
-            } else {
-                self.copy_from_file(&path, &mut bw)
-            }
-        } else {
+        let path_str = path.to_str().unwrap();
+        let metadata = if path_str.is_empty() || path_str == "-" {
             self.copy_from_stdin(&mut bw)
+        } else {
+            self.copy_from_file(&path, &mut bw)
         }?;
         let confidence = metadata.chardet.confidence;
         if metadata.read_bytes > 0 && !metadata.fallbacked && confidence < self.confidence_min {
@@ -171,12 +175,18 @@ fn main() {
     env_logger::init();
     let opt = Opt::from_args();
     let detat = Detat { confidence_min: opt.confidence_min, fallback_encoding: opt.fallback_encoding, json: opt.json };
-    let result = detat.run(opt.path);
-    match result {
-        Ok(_) => {}
-        Err(e) => {
-            error!("{}", e);
-            exit(1);
+    let mut paths = opt.paths.clone();
+    if paths.is_empty() {
+        paths.push(PathBuf::from(""))
+    }
+    for path in paths.iter() {
+        let result = detat.run(path.as_ref());
+        match result {
+            Ok(_) => {}
+            Err(e) => {
+                error!("{}", e);
+                exit(1);
+            }
         }
     }
 }
