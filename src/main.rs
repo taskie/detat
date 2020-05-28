@@ -22,7 +22,7 @@ pub struct Opt {
     #[structopt(name = "PATH")]
     path: Option<PathBuf>,
 
-    #[structopt(short, long, default_value = "0.8")]
+    #[structopt(short, long, default_value = "0")]
     confidence_min: f32,
 
     #[structopt(short, long = "fallback")]
