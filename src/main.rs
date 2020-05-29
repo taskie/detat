@@ -33,6 +33,9 @@ pub struct Opt {
 
     #[structopt(short, long)]
     stat: bool,
+
+    #[structopt(short = "b", long)]
+    allow_binary: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -72,6 +75,7 @@ pub struct Detat {
     fallback_encoding: Option<String>,
     json: bool,
     stat: bool,
+    allow_binary: bool,
 }
 
 impl Detat {
@@ -81,11 +85,32 @@ impl Detat {
         let chardet = ChardetResult::from_tuple(detect(bs.as_slice()));
         info!("predicted: {}, confidence: {}, language: {}", chardet.charset, chardet.confidence, chardet.language);
         if bs.is_empty() {
-            return Ok(Metadata::default());
+            let metadata = Metadata::default();
+            if self.stat {
+                if !self.json {
+                    self.print_metadata(&metadata, path, w)?;
+                }
+            }
+            return Ok(metadata);
         }
         let mut fallbacked = false;
         let charset = chardet.charset.clone();
-        let encoding = if !charset.is_empty() && chardet.confidence >= self.confidence_min {
+        if charset.is_empty() {
+            return if self.allow_binary {
+                let metadata = Metadata { chardet, read_bytes, ..Metadata::default() };
+                if self.stat {
+                    if !self.json {
+                        self.print_metadata(&metadata, path, w)?;
+                    }
+                } else {
+                    w.write(&bs)?;
+                }
+                Ok(metadata)
+            } else {
+                Err(io::Error::new(io::ErrorKind::InvalidInput, format!("Input is binary")))
+            };
+        }
+        let encoding = if chardet.confidence >= self.confidence_min {
             charset2encoding(&charset)
         } else {
             if let Some(enc) = &self.fallback_encoding {
@@ -145,7 +170,11 @@ impl Detat {
         let metadata = self.copy(r, path, &mut content)?;
         let mut json = {
             let path = path.and_then(|p| p.to_str()).map(|s| s.to_owned());
-            let content = if self.stat { None } else { Some(String::from_utf8(content).unwrap()) };
+            let content = if self.stat || metadata.chardet.charset.is_empty() {
+                None
+            } else {
+                Some(String::from_utf8(content).unwrap())
+            };
             let output = Output { metadata: metadata.clone(), path, content };
             serde_json::to_vec(&output).unwrap()
         };
@@ -205,6 +234,7 @@ fn main() {
         fallback_encoding: opt.fallback_encoding,
         json: opt.json,
         stat: opt.stat,
+        allow_binary: opt.allow_binary,
     };
     let mut paths = opt.paths.clone();
     if paths.is_empty() {
