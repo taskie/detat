@@ -30,6 +30,9 @@ pub struct Opt {
 
     #[structopt(short, long)]
     json: bool,
+
+    #[structopt(short, long)]
+    stat: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -61,17 +64,18 @@ pub struct Metadata {
 pub struct Output {
     path: Option<String>,
     metadata: Metadata,
-    content: String,
+    content: Option<String>,
 }
 
 pub struct Detat {
     confidence_min: f32,
     fallback_encoding: Option<String>,
     json: bool,
+    stat: bool,
 }
 
 impl Detat {
-    pub fn copy<R: Read, W: Write>(&self, r: &mut R, w: &mut W) -> Result<Metadata, io::Error> {
+    pub fn copy<R: Read, W: Write>(&self, r: &mut R, path: Option<&Path>, w: &mut W) -> Result<Metadata, io::Error> {
         let mut bs = Vec::new();
         let read_bytes = r.read_to_end(&mut bs)?;
         let chardet = ChardetResult::from_tuple(detect(bs.as_slice()));
@@ -91,6 +95,13 @@ impl Detat {
                 charset2encoding(&charset)
             }
         };
+        let metadata = Metadata { chardet, encoding: encoding.to_string(), fallbacked, read_bytes };
+        if self.stat {
+            if !self.json {
+                self.print_metadata(&metadata, path, w)?;
+            }
+            return Ok(metadata);
+        }
         let enc = match encoding_from_whatwg_label(encoding) {
             Some(e) => e,
             None => {
@@ -107,7 +118,21 @@ impl Detat {
             }
         };
         w.write(s.as_bytes())?;
-        Ok(Metadata { chardet, encoding: encoding.to_string(), fallbacked, read_bytes })
+        Ok(metadata)
+    }
+
+    pub fn print_metadata<W: Write>(
+        &self,
+        metadata: &Metadata,
+        path: Option<&Path>,
+        w: &mut W,
+    ) -> Result<(), io::Error> {
+        write!(w, "---\n")?;
+        write!(w, "Path: {}\n", path.and_then(|p| p.to_str()).unwrap_or("-"))?;
+        write!(w, "Charset: {}\n", metadata.chardet.charset)?;
+        write!(w, "Confidence: {}\n", metadata.chardet.confidence)?;
+        write!(w, "Language: {}\n", metadata.chardet.language)?;
+        Ok(())
     }
 
     pub fn copy_as_json<R: Read, W: Write>(
@@ -117,10 +142,11 @@ impl Detat {
         w: &mut W,
     ) -> Result<Metadata, io::Error> {
         let mut content: Vec<u8> = Vec::new();
-        let metadata = self.copy(r, &mut content)?;
+        let metadata = self.copy(r, path, &mut content)?;
         let mut json = {
             let path = path.and_then(|p| p.to_str()).map(|s| s.to_owned());
-            let output = Output { metadata: metadata.clone(), path, content: String::from_utf8(content).unwrap() };
+            let content = if self.stat { None } else { Some(String::from_utf8(content).unwrap()) };
+            let output = Output { metadata: metadata.clone(), path, content };
             serde_json::to_vec(&output).unwrap()
         };
         json.push('\n' as u8);
@@ -134,7 +160,7 @@ impl Detat {
         if self.json {
             self.copy_as_json(&mut handle, None, w)
         } else {
-            self.copy(&mut handle, w)
+            self.copy(&mut handle, None, w)
         }
     }
 
@@ -143,7 +169,7 @@ impl Detat {
         if self.json {
             self.copy_as_json(&mut file, Some(path), w)
         } else {
-            self.copy(&mut file, w)
+            self.copy(&mut file, Some(path), w)
         }
     }
 
@@ -174,7 +200,12 @@ impl Detat {
 fn main() {
     env_logger::init();
     let opt = Opt::from_args();
-    let detat = Detat { confidence_min: opt.confidence_min, fallback_encoding: opt.fallback_encoding, json: opt.json };
+    let detat = Detat {
+        confidence_min: opt.confidence_min,
+        fallback_encoding: opt.fallback_encoding,
+        json: opt.json,
+        stat: opt.stat,
+    };
     let mut paths = opt.paths.clone();
     if paths.is_empty() {
         paths.push(PathBuf::from(""))
