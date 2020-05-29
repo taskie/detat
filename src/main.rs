@@ -210,14 +210,18 @@ fn main() {
     if paths.is_empty() {
         paths.push(PathBuf::from(""))
     }
+    let mut error = false;
     for path in paths.iter() {
         let result = detat.run(path.as_ref());
         match result {
             Ok(_) => {}
             Err(e) => {
                 error!("{}", e);
-                exit(1);
+                error = true;
             }
         }
+    }
+    if error {
+        exit(1)
     }
 }
