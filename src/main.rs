@@ -2,6 +2,8 @@
 extern crate log;
 
 use std::{
+    borrow::Cow,
+    error, fmt,
     fs::File,
     io,
     io::{BufWriter, Read, Write},
@@ -13,6 +15,64 @@ use chardet::{charset2encoding, detect};
 use encoding::{label::encoding_from_whatwg_label, DecoderTrap};
 use serde::{Deserialize, Serialize};
 use structopt::{clap, StructOpt};
+
+#[derive(Debug)]
+pub struct DetatError {
+    kind: DetatErrorKind,
+}
+
+impl DetatError {
+    pub fn invalid_input(kind: InvalidInputErrorKind, message: String) -> DetatError {
+        DetatError { kind: DetatErrorKind::InvalidInput(kind, message) }
+    }
+
+    pub fn decode(s: Cow<'static, str>) -> DetatError {
+        DetatError { kind: DetatErrorKind::Decode(s) }
+    }
+}
+
+#[derive(Debug)]
+pub enum DetatErrorKind {
+    Io(io::Error),
+    InvalidInput(InvalidInputErrorKind, String),
+    Decode(Cow<'static, str>),
+    #[doc(hidden)]
+    __Nonexhaustive,
+}
+
+#[derive(Debug)]
+pub enum InvalidInputErrorKind {
+    IsBinary,
+    NoEncoding(String, String),
+    LowConfidence(String, f32, f32),
+    #[doc(hidden)]
+    __Nonexhaustive,
+}
+
+impl error::Error for DetatError {
+    fn description(&self) -> &str {
+        "detat error"
+    }
+}
+
+impl fmt::Display for DetatError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self.kind {
+            DetatErrorKind::Io(ref e) => e.fmt(f),
+            DetatErrorKind::InvalidInput(_, ref m) => f.write_str(m),
+            DetatErrorKind::Decode(ref s) => f.write_str(s),
+            _ => f.write_str("internal error"),
+        }
+    }
+}
+
+impl From<io::Error> for DetatError {
+    fn from(ioerr: io::Error) -> DetatError {
+        DetatError { kind: DetatErrorKind::Io(ioerr) }
+    }
+}
+
+type DetatResult<T> = Result<T, DetatError>;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "detat")]
@@ -79,7 +139,7 @@ pub struct Detat {
 }
 
 impl Detat {
-    pub fn copy<R: Read, W: Write>(&self, r: &mut R, path: Option<&Path>, w: &mut W) -> Result<Metadata, io::Error> {
+    pub fn copy<R: Read, W: Write>(&self, r: &mut R, path: Option<&Path>, w: &mut W) -> DetatResult<Metadata> {
         let mut bs = Vec::new();
         let read_bytes = r.read_to_end(&mut bs)?;
         let chardet = ChardetResult::from_tuple(detect(bs.as_slice()));
@@ -107,7 +167,7 @@ impl Detat {
                 }
                 Ok(metadata)
             } else {
-                Err(io::Error::new(io::ErrorKind::InvalidInput, format!("Input is binary")))
+                Err(DetatError::invalid_input(InvalidInputErrorKind::IsBinary, "Input is binary".to_string()))
             };
         }
         let encoding = if chardet.confidence >= self.confidence_min {
@@ -130,8 +190,8 @@ impl Detat {
         let enc = match encoding_from_whatwg_label(encoding) {
             Some(e) => e,
             None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
+                return Err(DetatError::invalid_input(
+                    InvalidInputErrorKind::NoEncoding(encoding.to_string(), charset.clone()),
                     format!("no encoding: \"{}\" (charset: \"{}\")", encoding, charset),
                 ));
             }
@@ -139,7 +199,7 @@ impl Detat {
         let s = match enc.decode(bs.as_slice(), DecoderTrap::Strict) {
             Ok(s) => s,
             Err(e) => {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, e));
+                return Err(DetatError::decode(e));
             }
         };
         w.write(s.as_bytes())?;
@@ -160,12 +220,7 @@ impl Detat {
         Ok(())
     }
 
-    pub fn copy_as_json<R: Read, W: Write>(
-        &self,
-        r: &mut R,
-        path: Option<&Path>,
-        w: &mut W,
-    ) -> Result<Metadata, io::Error> {
+    pub fn copy_as_json<R: Read, W: Write>(&self, r: &mut R, path: Option<&Path>, w: &mut W) -> DetatResult<Metadata> {
         let mut content: Vec<u8> = Vec::new();
         let metadata = self.copy(r, path, &mut content)?;
         let mut json = {
@@ -183,7 +238,7 @@ impl Detat {
         Ok(metadata)
     }
 
-    pub fn copy_from_stdin<W: Write>(&self, w: &mut W) -> Result<Metadata, io::Error> {
+    pub fn copy_from_stdin<W: Write>(&self, w: &mut W) -> DetatResult<Metadata> {
         let stdin = io::stdin();
         let mut handle = stdin.lock();
         if self.json {
@@ -193,7 +248,7 @@ impl Detat {
         }
     }
 
-    pub fn copy_from_file<W: Write>(&self, path: &Path, w: &mut W) -> Result<Metadata, io::Error> {
+    pub fn copy_from_file<W: Write>(&self, path: &Path, w: &mut W) -> DetatResult<Metadata> {
         let mut file = File::open(path)?;
         if self.json {
             self.copy_as_json(&mut file, Some(path), w)
@@ -202,7 +257,7 @@ impl Detat {
         }
     }
 
-    pub fn run(&self, path: &Path) -> Result<Metadata, io::Error> {
+    pub fn run(&self, path: &Path) -> DetatResult<Metadata> {
         let stdout = io::stdout();
         let w = stdout.lock();
         let mut bw = BufWriter::new(w);
@@ -214,8 +269,8 @@ impl Detat {
         }?;
         let confidence = metadata.chardet.confidence;
         if metadata.read_bytes > 0 && !metadata.fallbacked && confidence < self.confidence_min {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
+            return Err(DetatError::invalid_input(
+                InvalidInputErrorKind::LowConfidence(metadata.chardet.charset.clone(), confidence, self.confidence_min),
                 format!(
                     "confidence: {} < {} (predicted: {})",
                     confidence, self.confidence_min, metadata.chardet.charset
