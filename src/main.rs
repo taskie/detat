@@ -75,26 +75,37 @@ impl From<io::Error> for DetatError {
 type DetatResult<T> = Result<T, DetatError>;
 
 #[derive(Debug, StructOpt)]
-#[structopt(name = "detat")]
+#[structopt(name = "detat", about = "cat with chardet")]
 #[structopt(long_version(option_env!("LONG_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))))]
 #[structopt(setting(clap::AppSettings::ColoredHelp))]
 pub struct Opt {
-    #[structopt(name = "PATHS")]
+    #[structopt(name = "PATH", help = "An input file")]
     paths: Vec<PathBuf>,
 
-    #[structopt(short, long, default_value = "0")]
+    #[structopt(
+        short,
+        long,
+        name = "CONFIDENCE_MIN",
+        default_value = "0",
+        help = "Fail if detected confidence is less than this"
+    )]
     confidence_min: f32,
 
-    #[structopt(short, long = "fallback")]
+    #[structopt(
+        short,
+        long = "fallback",
+        name = "ENCODING",
+        help = "Use this encoding if detected confidence is less than <CONFIDENCE_MIN>"
+    )]
     fallback_encoding: Option<String>,
 
-    #[structopt(short, long)]
+    #[structopt(short, long, help = "Show results in a JSON Lines format")]
     json: bool,
 
-    #[structopt(short, long)]
+    #[structopt(short, long, help = "Show statistics")]
     stat: bool,
 
-    #[structopt(short = "b", long)]
+    #[structopt(short = "b", long, help = "Print a binary input as it is")]
     allow_binary: bool,
 }
 
