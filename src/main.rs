@@ -1,6 +1,9 @@
 #[macro_use]
 extern crate log;
 
+use chardet::{charset2encoding, detect};
+use encoding::{label::encoding_from_whatwg_label, DecoderTrap};
+use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
     error, fmt,
@@ -9,11 +12,8 @@ use std::{
     io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
     process::exit,
+    str::FromStr,
 };
-
-use chardet::{charset2encoding, detect};
-use encoding::{label::encoding_from_whatwg_label, DecoderTrap};
-use serde::{Deserialize, Serialize};
 use structopt::{clap, StructOpt};
 
 #[derive(Debug)]
@@ -22,6 +22,10 @@ pub struct DetatError {
 }
 
 impl DetatError {
+    pub fn invalid_opt(message: String) -> DetatError {
+        DetatError { kind: DetatErrorKind::InvalidOpt(message) }
+    }
+
     pub fn invalid_input(kind: InvalidInputErrorKind, message: String) -> DetatError {
         DetatError { kind: DetatErrorKind::InvalidInput(kind, message) }
     }
@@ -34,6 +38,7 @@ impl DetatError {
 #[derive(Debug)]
 pub enum DetatErrorKind {
     Io(io::Error),
+    InvalidOpt(String),
     InvalidInput(InvalidInputErrorKind, String),
     Decode(Cow<'static, str>),
     #[doc(hidden)]
@@ -69,6 +74,31 @@ impl fmt::Display for DetatError {
 impl From<io::Error> for DetatError {
     fn from(ioerr: io::Error) -> DetatError {
         DetatError { kind: DetatErrorKind::Io(ioerr) }
+    }
+}
+struct MyDecoderTrap(DecoderTrap);
+
+impl FromStr for MyDecoderTrap {
+    type Err = DetatError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "strict" => Ok(MyDecoderTrap(DecoderTrap::Strict)),
+            "replace" => Ok(MyDecoderTrap(DecoderTrap::Replace)),
+            "ignore" => Ok(MyDecoderTrap(DecoderTrap::Ignore)),
+            _ => Err(DetatError::invalid_opt(format!("invalid decoder trap: {}", s))),
+        }
+    }
+}
+
+impl std::fmt::Debug for MyDecoderTrap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            DecoderTrap::Strict => f.write_str("strict"),
+            DecoderTrap::Replace => f.write_str("replace"),
+            DecoderTrap::Ignore => f.write_str("ignore"),
+            DecoderTrap::Call(_) => f.write_str("call"),
+        }
     }
 }
 
@@ -107,6 +137,15 @@ pub struct Opt {
 
     #[structopt(short = "b", long, help = "Print a binary input as it is")]
     allow_binary: bool,
+
+    #[structopt(
+        short = "t",
+        long,
+        name = "TRAP",
+        default_value = "strict",
+        help = "Use this trap handler if errors occur"
+    )]
+    decoder_trap: MyDecoderTrap,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -147,6 +186,7 @@ pub struct Detat {
     json: bool,
     stat: bool,
     allow_binary: bool,
+    decoder_trap: DecoderTrap,
 }
 
 impl Detat {
@@ -207,7 +247,7 @@ impl Detat {
                 ));
             }
         };
-        let s = match enc.decode(bs.as_slice(), DecoderTrap::Strict) {
+        let s = match enc.decode(bs.as_slice(), self.decoder_trap) {
             Ok(s) => s,
             Err(e) => {
                 return Err(DetatError::decode(e));
@@ -301,6 +341,7 @@ fn main() {
         json: opt.json,
         stat: opt.stat,
         allow_binary: opt.allow_binary,
+        decoder_trap: opt.decoder_trap.0,
     };
     let mut paths = opt.paths.clone();
     if paths.is_empty() {
