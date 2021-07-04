@@ -36,22 +36,20 @@ impl DetatError {
 }
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum DetatErrorKind {
     Io(io::Error),
     InvalidOpt(String),
     InvalidInput(InvalidInputErrorKind, String),
     Decode(Cow<'static, str>),
-    #[doc(hidden)]
-    __Nonexhaustive,
 }
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum InvalidInputErrorKind {
     IsBinary,
     NoEncoding(String, String),
     LowConfidence(String, f32, f32),
-    #[doc(hidden)]
-    __Nonexhaustive,
 }
 
 impl error::Error for DetatError {
@@ -197,10 +195,8 @@ impl Detat {
         info!("predicted: {}, confidence: {}, language: {}", chardet.charset, chardet.confidence, chardet.language);
         if bs.is_empty() {
             let metadata = Metadata::default();
-            if self.stat {
-                if !self.json {
-                    self.print_metadata(&metadata, path, w)?;
-                }
+            if self.stat && !self.json {
+                self.print_metadata(&metadata, path, w)?;
             }
             return Ok(metadata);
         }
@@ -214,7 +210,7 @@ impl Detat {
                         self.print_metadata(&metadata, path, w)?;
                     }
                 } else {
-                    w.write(&bs)?;
+                    w.write_all(&bs)?;
                 }
                 Ok(metadata)
             } else {
@@ -223,13 +219,11 @@ impl Detat {
         }
         let encoding = if chardet.confidence >= self.confidence_min {
             charset2encoding(&charset)
+        } else if let Some(enc) = &self.fallback_encoding {
+            fallbacked = true;
+            enc.as_str()
         } else {
-            if let Some(enc) = &self.fallback_encoding {
-                fallbacked = true;
-                enc.as_str()
-            } else {
-                charset2encoding(&charset)
-            }
+            charset2encoding(&charset)
         };
         let metadata = Metadata { chardet, encoding: encoding.to_string(), fallbacked, read_bytes };
         if self.stat {
@@ -253,7 +247,7 @@ impl Detat {
                 return Err(DetatError::decode(e));
             }
         };
-        w.write(s.as_bytes())?;
+        w.write_all(s.as_bytes())?;
         Ok(metadata)
     }
 
@@ -263,11 +257,11 @@ impl Detat {
         path: Option<&Path>,
         w: &mut W,
     ) -> Result<(), io::Error> {
-        write!(w, "---\n")?;
-        write!(w, "Path: {}\n", path.and_then(|p| p.to_str()).unwrap_or("-"))?;
-        write!(w, "Charset: {}\n", metadata.chardet.charset)?;
-        write!(w, "Confidence: {}\n", metadata.chardet.confidence)?;
-        write!(w, "Language: {}\n", metadata.chardet.language)?;
+        writeln!(w, "---")?;
+        writeln!(w, "Path: {}", path.and_then(|p| p.to_str()).unwrap_or("-"))?;
+        writeln!(w, "Charset: {}", metadata.chardet.charset)?;
+        writeln!(w, "Confidence: {}", metadata.chardet.confidence)?;
+        writeln!(w, "Language: {}", metadata.chardet.language)?;
         Ok(())
     }
 
@@ -284,7 +278,7 @@ impl Detat {
             let output = Output { metadata: metadata.clone(), path, content };
             serde_json::to_vec(&output).unwrap()
         };
-        json.push('\n' as u8);
+        json.push(b'\n');
         w.write_all(json.as_slice())?;
         Ok(metadata)
     }
@@ -316,7 +310,7 @@ impl Detat {
         let metadata = if path_str.is_empty() || path_str == "-" {
             self.copy_from_stdin(&mut bw)
         } else {
-            self.copy_from_file(&path, &mut bw)
+            self.copy_from_file(path, &mut bw)
         }?;
         let confidence = metadata.chardet.confidence;
         if metadata.read_bytes > 0 && !metadata.fallbacked && confidence < self.confidence_min {
@@ -343,7 +337,7 @@ fn main() {
         allow_binary: opt.allow_binary,
         decoder_trap: opt.decoder_trap.0,
     };
-    let mut paths = opt.paths.clone();
+    let mut paths = opt.paths;
     if paths.is_empty() {
         paths.push(PathBuf::from(""))
     }
