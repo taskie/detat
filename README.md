@@ -1,6 +1,6 @@
 # detat
 
-cat with chardet
+cat(1) with chardet.
 
 ![detat](images/example.gif)
 
@@ -25,6 +25,14 @@ ARGS:
     <PATH>...    An input file
 ```
 
+## Installation
+
+```sh
+git clone https://github.com/taskie/detat.git
+cd detat
+cargo install --path .
+```
+
 ## License
 
-Apache 2.0
+LGPL-3.0
