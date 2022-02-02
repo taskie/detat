@@ -1,10 +1,10 @@
 pkgname=detat-git
-pkgver=0.1.1
+pkgver=0.2.0
 pkgrel=1
-pkgdesc="cat with chardet."
+pkgdesc="cat(1) with chardet."
 arch=('x86_64')
 url="https://github.com/taskie/detat"
-license=('Apache-2.0')
+license=('LGPL3')
 provides=("detat")
 makedepends=('cargo' 'git')
 optdepends=()
