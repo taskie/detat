@@ -7,8 +7,8 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-chardet = "0.2"
-encoding = "0.2"
+chardetng = "0.1.17"
+encoding_rs = "0.8.30"
 env_logger = "0.8"
 log = "0.4"
 serde = { version = "1.0", features = ["derive"] }

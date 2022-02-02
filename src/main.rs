@@ -1,8 +1,8 @@
 #[macro_use]
 extern crate log;
 
-use chardet::{charset2encoding, detect};
-use encoding::{label::encoding_from_whatwg_label, DecoderTrap};
+use chardetng::EncodingDetector;
+use encoding_rs::Encoding;
 use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
@@ -12,7 +12,6 @@ use std::{
     io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
     process::exit,
-    str::FromStr,
 };
 use structopt::{clap, StructOpt};
 
@@ -48,8 +47,8 @@ pub enum DetatErrorKind {
 #[non_exhaustive]
 pub enum InvalidInputErrorKind {
     IsBinary,
-    NoEncoding(String, String),
-    LowConfidence(String, f32, f32),
+    NoEncoding(String),
+    NoConfidence(String),
 }
 
 impl error::Error for DetatError {
@@ -74,31 +73,6 @@ impl From<io::Error> for DetatError {
         DetatError { kind: DetatErrorKind::Io(ioerr) }
     }
 }
-struct MyDecoderTrap(DecoderTrap);
-
-impl FromStr for MyDecoderTrap {
-    type Err = DetatError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "strict" => Ok(MyDecoderTrap(DecoderTrap::Strict)),
-            "replace" => Ok(MyDecoderTrap(DecoderTrap::Replace)),
-            "ignore" => Ok(MyDecoderTrap(DecoderTrap::Ignore)),
-            _ => Err(DetatError::invalid_opt(format!("invalid decoder trap: {}", s))),
-        }
-    }
-}
-
-impl std::fmt::Debug for MyDecoderTrap {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0 {
-            DecoderTrap::Strict => f.write_str("strict"),
-            DecoderTrap::Replace => f.write_str("replace"),
-            DecoderTrap::Ignore => f.write_str("ignore"),
-            DecoderTrap::Call(_) => f.write_str("call"),
-        }
-    }
-}
 
 type DetatResult<T> = Result<T, DetatError>;
 
@@ -109,15 +83,6 @@ type DetatResult<T> = Result<T, DetatError>;
 pub struct Opt {
     #[structopt(name = "PATH", help = "An input file")]
     paths: Vec<PathBuf>,
-
-    #[structopt(
-        short,
-        long,
-        name = "CONFIDENCE_MIN",
-        default_value = "0",
-        help = "Fail if detected confidence is less than this"
-    )]
-    confidence_min: f32,
 
     #[structopt(
         short,
@@ -132,34 +97,36 @@ pub struct Opt {
 
     #[structopt(short, long, help = "Show statistics")]
     stat: bool,
+}
 
-    #[structopt(short = "b", long, help = "Print a binary input as it is")]
-    allow_binary: bool,
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct EncodingResult {
+    name: String,
+}
 
-    #[structopt(
-        short = "t",
-        long,
-        name = "TRAP",
-        default_value = "strict",
-        help = "Use this trap handler if errors occur"
-    )]
-    decoder_trap: MyDecoderTrap,
+impl EncodingResult {
+    pub fn with_name(name: &str) -> EncodingResult {
+        EncodingResult {
+            name: name.to_owned(),
+        }
+    }
+    
+    pub fn from_encoding(encoding: &'static Encoding) -> EncodingResult {
+        EncodingResult {
+            name: encoding.name().to_owned(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ChardetResult {
-    charset: String,
-    confidence: f32,
-    language: String,
+    encoding: EncodingResult,
+    has_confidence: bool,
 }
 
 impl ChardetResult {
-    pub fn new(charset: String, confidence: f32, language: String) -> ChardetResult {
-        ChardetResult { charset, confidence, language }
-    }
-
-    pub fn from_tuple((charset, confidence, language): (String, f32, String)) -> ChardetResult {
-        Self::new(charset, confidence, language)
+    pub fn new(encoding: EncodingResult, has_confidence: bool) -> ChardetResult {
+        ChardetResult { encoding, has_confidence }
     }
 }
 
@@ -179,20 +146,19 @@ pub struct Output {
 }
 
 pub struct Detat {
-    confidence_min: f32,
     fallback_encoding: Option<String>,
     json: bool,
     stat: bool,
-    allow_binary: bool,
-    decoder_trap: DecoderTrap,
 }
 
 impl Detat {
     pub fn copy<R: Read, W: Write>(&self, r: &mut R, path: Option<&Path>, w: &mut W) -> DetatResult<Metadata> {
         let mut bs = Vec::new();
         let read_bytes = r.read_to_end(&mut bs)?;
-        let chardet = ChardetResult::from_tuple(detect(bs.as_slice()));
-        info!("predicted: {}, confidence: {}, language: {}", chardet.charset, chardet.confidence, chardet.language);
+        let mut detector = EncodingDetector::new();
+        detector.feed(&bs, true);
+        let (encoding, has_confidence) = detector.guess_assess(None, true);
+        info!("predicted: {}, has_confidence: {}", encoding.name(), has_confidence);
         if bs.is_empty() {
             let metadata = Metadata::default();
             if self.stat && !self.json {
@@ -201,52 +167,32 @@ impl Detat {
             return Ok(metadata);
         }
         let mut fallbacked = false;
-        let charset = chardet.charset.clone();
-        if charset.is_empty() {
-            return if self.allow_binary {
-                let metadata = Metadata { chardet, read_bytes, ..Metadata::default() };
-                if self.stat {
-                    if !self.json {
-                        self.print_metadata(&metadata, path, w)?;
-                    }
-                } else {
-                    w.write_all(&bs)?;
-                }
-                Ok(metadata)
-            } else {
-                Err(DetatError::invalid_input(InvalidInputErrorKind::IsBinary, "Input is binary".to_string()))
-            };
-        }
-        let encoding = if chardet.confidence >= self.confidence_min {
-            charset2encoding(&charset)
+        let encoding = if has_confidence {
+            EncodingResult::from_encoding(encoding)
         } else if let Some(enc) = &self.fallback_encoding {
             fallbacked = true;
-            enc.as_str()
+            EncodingResult::with_name(enc)
         } else {
-            charset2encoding(&charset)
+            EncodingResult::from_encoding(encoding)
         };
-        let metadata = Metadata { chardet, encoding: encoding.to_string(), fallbacked, read_bytes };
+        let encoding_name = encoding.name.clone();
+        let metadata = Metadata { chardet: ChardetResult::new(encoding, has_confidence), encoding: encoding_name.clone(), fallbacked, read_bytes };
         if self.stat {
             if !self.json {
                 self.print_metadata(&metadata, path, w)?;
             }
             return Ok(metadata);
         }
-        let enc = match encoding_from_whatwg_label(encoding) {
+        let enc = match Encoding::for_label(encoding_name.as_bytes()) {
             Some(e) => e,
             None => {
                 return Err(DetatError::invalid_input(
-                    InvalidInputErrorKind::NoEncoding(encoding.to_string(), charset.clone()),
-                    format!("no encoding: \"{}\" (charset: \"{}\")", encoding, charset),
+                    InvalidInputErrorKind::NoEncoding(encoding_name.clone()),
+                    format!("no encoding: \"{}\"", &encoding_name),
                 ));
             }
         };
-        let s = match enc.decode(bs.as_slice(), self.decoder_trap) {
-            Ok(s) => s,
-            Err(e) => {
-                return Err(DetatError::decode(e));
-            }
-        };
+        let (s, _, _) = enc.decode(bs.as_slice());
         w.write_all(s.as_bytes())?;
         Ok(metadata)
     }
@@ -259,9 +205,8 @@ impl Detat {
     ) -> Result<(), io::Error> {
         writeln!(w, "---")?;
         writeln!(w, "Path: {}", path.and_then(|p| p.to_str()).unwrap_or("-"))?;
-        writeln!(w, "Charset: {}", metadata.chardet.charset)?;
-        writeln!(w, "Confidence: {}", metadata.chardet.confidence)?;
-        writeln!(w, "Language: {}", metadata.chardet.language)?;
+        writeln!(w, "Charset: {}", metadata.chardet.encoding.name)?;
+        writeln!(w, "Has confidence: {}", metadata.chardet.has_confidence)?;
         Ok(())
     }
 
@@ -270,11 +215,7 @@ impl Detat {
         let metadata = self.copy(r, path, &mut content)?;
         let mut json = {
             let path = path.and_then(|p| p.to_str()).map(|s| s.to_owned());
-            let content = if self.stat || metadata.chardet.charset.is_empty() {
-                None
-            } else {
-                Some(String::from_utf8(content).unwrap())
-            };
+            let content = Some(String::from_utf8(content).unwrap());
             let output = Output { metadata: metadata.clone(), path, content };
             serde_json::to_vec(&output).unwrap()
         };
@@ -312,13 +253,13 @@ impl Detat {
         } else {
             self.copy_from_file(path, &mut bw)
         }?;
-        let confidence = metadata.chardet.confidence;
-        if metadata.read_bytes > 0 && !metadata.fallbacked && confidence < self.confidence_min {
+        if metadata.read_bytes > 0 && !metadata.fallbacked && ! metadata.chardet.has_confidence {
+            let encoding_name = metadata.chardet.encoding.name.clone();
             return Err(DetatError::invalid_input(
-                InvalidInputErrorKind::LowConfidence(metadata.chardet.charset.clone(), confidence, self.confidence_min),
+                InvalidInputErrorKind::NoConfidence(encoding_name.clone()),
                 format!(
-                    "confidence: {} < {} (predicted: {})",
-                    confidence, self.confidence_min, metadata.chardet.charset
+                    "no confidence (predicted: {})",
+                    &encoding_name,
                 ),
             ));
         }
@@ -330,12 +271,9 @@ fn main() {
     env_logger::init();
     let opt = Opt::from_args();
     let detat = Detat {
-        confidence_min: opt.confidence_min,
         fallback_encoding: opt.fallback_encoding,
         json: opt.json,
         stat: opt.stat,
-        allow_binary: opt.allow_binary,
-        decoder_trap: opt.decoder_trap.0,
     };
     let mut paths = opt.paths;
     if paths.is_empty() {
